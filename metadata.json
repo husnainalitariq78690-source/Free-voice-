@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Voice Studio",
+  "description": "Professional AI voice generation studio powered by Gemini 2.5 Flash TTS.",
+  "requestFramePermissions": []
+}
