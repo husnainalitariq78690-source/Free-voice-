@@ -20,6 +20,7 @@ interface ProjectItem {
   name: string;
   date: string;
   downloadUrl: string;
+  zipUrl?: string;
 }
 
 const MultiVoiceSaaS = () => {
@@ -36,6 +37,12 @@ const MultiVoiceSaaS = () => {
   const [audioQuality, setAudioQuality] = useState({
     sampleRate: "24000",
     bitrate: "128"
+  });
+  const [voiceSettings, setVoiceSettings] = useState({
+    speed: 1.0,
+    pitch: 0,
+    style: "neutral",
+    gender: "female" as "male" | "female"
   });
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -88,6 +95,16 @@ const MultiVoiceSaaS = () => {
     }
   };
 
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      setScript(event.target?.result as string);
+    };
+    reader.readAsText(file);
+  };
+
   const handlePreview = async () => {
     if (!previewConfig.text.trim()) return;
     setPreviewLoading(true);
@@ -121,12 +138,13 @@ const MultiVoiceSaaS = () => {
         if (status === "completed") {
           clearInterval(interval);
           setLoading(false);
-          const { projectId, fileName, downloadUrl } = result;
+          const { projectId, fileName, downloadUrl, zipUrl } = result;
           const newEntry: ProjectItem = {
             id: projectId,
             name: projectName || "Untitled Project",
             date: new Date().toLocaleTimeString(),
-            downloadUrl: downloadUrl
+            downloadUrl: downloadUrl,
+            zipUrl: zipUrl
           };
           saveToHistory(newEntry);
           setCurrentAudio(downloadUrl);
@@ -140,7 +158,7 @@ const MultiVoiceSaaS = () => {
         setLoading(false);
         setError("Failed to track progress.");
       }
-    }, 1000);
+    }, 1500);
   };
 
   const handleGenerate = async () => {
@@ -150,10 +168,11 @@ const MultiVoiceSaaS = () => {
     setStatus("Initiating...");
     setError(null);
     try {
-      const response = await axios.post('/api/generate', {
+      const response = await axios.post('/api/generate-longform', {
         script,
         project_name: projectName,
-        quality: audioQuality
+        quality: audioQuality,
+        settings: voiceSettings
       });
       const { jobId } = response.data;
       pollJobStatus(jobId);
@@ -345,17 +364,71 @@ const MultiVoiceSaaS = () => {
                         <option value="48000">48kHz (Studio)</option>
                       </select>
                     </div>
-                    <div className="space-y-2">
-                      <label className="text-[9px] font-bold text-slate-600 uppercase tracking-[0.2em] ml-1">Bitrate</label>
-                      <select 
-                        className="w-full bg-studio-800/50 border border-white/[0.05] p-3 rounded-xl text-xs focus:ring-1 focus:ring-emerald-500/50 outline-none transition-all appearance-none cursor-pointer hover:bg-studio-700/50"
-                        value={audioQuality.bitrate}
-                        onChange={(e) => setAudioQuality({...audioQuality, bitrate: e.target.value})}
-                      >
-                        <option value="64">64kbps</option>
-                        <option value="128">128kbps</option>
-                        <option value="192">192kbps</option>
-                      </select>
+                  </div>
+                </motion.section>
+
+                {/* Voice Expression Section */}
+                <motion.section
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.25 }}
+                >
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="w-1.5 h-4 bg-emerald-500 rounded-full shadow-[0_0_10px_rgba(16,185,129,0.5)]"></div>
+                    <h2 className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-400">Voice Expression</h2>
+                  </div>
+                  <div className="space-y-5">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-2">
+                        <label className="text-[9px] font-bold text-slate-600 uppercase tracking-[0.2em] ml-1">Gender</label>
+                        <select 
+                          className="w-full bg-studio-800/50 border border-white/[0.05] p-3 rounded-xl text-xs focus:ring-1 focus:ring-emerald-500/50 outline-none transition-all appearance-none cursor-pointer hover:bg-studio-700/50"
+                          value={voiceSettings.gender}
+                          onChange={(e) => setVoiceSettings({...voiceSettings, gender: e.target.value as any})}
+                        >
+                          <option value="female">Female</option>
+                          <option value="male">Male</option>
+                        </select>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-[9px] font-bold text-slate-600 uppercase tracking-[0.2em] ml-1">Style</label>
+                        <select 
+                          className="w-full bg-studio-800/50 border border-white/[0.05] p-3 rounded-xl text-xs focus:ring-1 focus:ring-emerald-500/50 outline-none transition-all appearance-none cursor-pointer hover:bg-studio-700/50"
+                          value={voiceSettings.style}
+                          onChange={(e) => setVoiceSettings({...voiceSettings, style: e.target.value})}
+                        >
+                          <option value="neutral">Neutral</option>
+                          <option value="happy">Happy</option>
+                          <option value="sad">Sad</option>
+                          <option value="calm">Calm</option>
+                          <option value="energetic">Energetic</option>
+                          <option value="serious">Serious</option>
+                        </select>
+                      </div>
+                    </div>
+                    
+                    <div className="space-y-3">
+                      <div className="flex justify-between items-center">
+                        <label className="text-[9px] font-bold text-slate-600 uppercase tracking-[0.2em] ml-1">Speed ({voiceSettings.speed}x)</label>
+                      </div>
+                      <input 
+                        type="range" min="0.5" max="2.0" step="0.1"
+                        className="w-full accent-emerald-500 h-1 bg-studio-800 rounded-lg appearance-none cursor-pointer"
+                        value={voiceSettings.speed}
+                        onChange={(e) => setVoiceSettings({...voiceSettings, speed: parseFloat(e.target.value)})}
+                      />
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="flex justify-between items-center">
+                        <label className="text-[9px] font-bold text-slate-600 uppercase tracking-[0.2em] ml-1">Pitch ({voiceSettings.pitch})</label>
+                      </div>
+                      <input 
+                        type="range" min="-20" max="20" step="1"
+                        className="w-full accent-emerald-500 h-1 bg-studio-800 rounded-lg appearance-none cursor-pointer"
+                        value={voiceSettings.pitch}
+                        onChange={(e) => setVoiceSettings({...voiceSettings, pitch: parseInt(e.target.value)})}
+                      />
                     </div>
                   </div>
                 </motion.section>
@@ -389,7 +462,7 @@ const MultiVoiceSaaS = () => {
                     <h2 className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">Recent Masters</h2>
                   </div>
                   <div className="space-y-2">
-                    {history.length > 0 ? history.map((item) => (
+                    {history.length > 0 ? history.map((item: any) => (
                       <motion.div 
                         key={item.id} 
                         initial={{ opacity: 0, x: -10 }}
@@ -400,6 +473,11 @@ const MultiVoiceSaaS = () => {
                         <div className="flex gap-2">
                           <button onClick={() => setCurrentAudio(item.downloadUrl)} className="flex-grow bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-[9px] font-bold py-1.5 rounded transition-all">LOAD</button>
                           <a href={item.downloadUrl} download className="p-1.5 bg-studio-800 hover:bg-studio-700 rounded text-slate-400 transition-colors"><Download size={12} /></a>
+                          {item.zipUrl && (
+                            <a href={item.zipUrl} download className="p-1.5 bg-studio-800 hover:bg-studio-700 rounded text-emerald-500 transition-colors flex items-center gap-1">
+                              <Layers size={12} />
+                            </a>
+                          )}
                         </div>
                       </motion.div>
                     )) : (
@@ -476,6 +554,10 @@ const MultiVoiceSaaS = () => {
                       <div className="bg-white/[0.02] px-10 py-5 border-b border-white/[0.03] flex justify-between items-center">
                         <div className="flex items-center gap-8">
                           <div className="flex items-center gap-3">
+                            <label className="p-1.5 bg-white/5 hover:bg-white/10 rounded-lg transition-all cursor-pointer group">
+                              <Download size={14} className="text-slate-400 group-hover:text-emerald-500" />
+                              <input type="file" className="hidden" accept=".txt" onChange={handleFileUpload} />
+                            </label>
                             <div className="p-1.5 bg-emerald-500/10 rounded-lg">
                               <Mic2 size={14} className="text-emerald-500" />
                             </div>

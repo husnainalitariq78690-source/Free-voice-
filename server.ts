@@ -6,6 +6,7 @@ import axios from "axios";
 import { GoogleGenAI, Modality } from "@google/genai";
 import { v4 as uuidv4 } from "uuid";
 import Stripe from "stripe";
+import archiver from "archiver";
 
 const app = express();
 const PORT = 3000;
@@ -21,7 +22,7 @@ const getStripe = () => {
   return stripe;
 };
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 const STORAGE_DIR = path.join(process.cwd(), "storage");
 const PROJECTS_DIR = path.join(STORAGE_DIR, "projects");
@@ -73,13 +74,28 @@ const mergeWavBuffers = (buffers: Buffer[]) => {
   return merged;
 };
 
-async function generateTTS(text: string, provider: string, voiceId: string, quality?: { sampleRate: string, bitrate: string }): Promise<Buffer> {
-  const requestedSampleRate = parseInt(quality?.sampleRate || "24000");
-  
+const splitTextIntoSegments = (text: string, wordsPerSegment: number = 750) => {
+  const words = text.split(/\s+/);
+  const segments: string[] = [];
+  for (let i = 0; i < words.length; i += wordsPerSegment) {
+    segments.push(words.slice(i, i + wordsPerSegment).join(" "));
+  }
+  return segments;
+};
+
+async function generateTTS(text: string, provider: string, voiceId: string, options?: any): Promise<Buffer> {
+  const requestedSampleRate = parseInt(options?.quality?.sampleRate || "24000");
+  const speed = options?.settings?.speed || 1.0;
+  const pitch = options?.settings?.pitch || 0;
+  const style = options?.settings?.style || "neutral";
+
   if (provider === "google") {
+    // We use prompting to influence speed, pitch, and style as Gemini TTS doesn't have direct params yet
+    const prompt = `Say this in a ${style} tone, at ${speed}x speed, with a pitch offset of ${pitch}: ${text}`;
+    
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text }] }],
+      contents: [{ parts: [{ text: prompt }] }],
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
@@ -92,27 +108,7 @@ async function generateTTS(text: string, provider: string, voiceId: string, qual
     const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!base64Audio) throw new Error("No audio data from Gemini");
     const pcmBuffer = Buffer.from(base64Audio, "base64");
-    // Gemini TTS returns 24kHz PCM. If user requested different, we use it in header.
-    // Note: This doesn't resample, just changes playback speed unless resampled.
-    // For a real app, we'd use ffmpeg to resample.
     return createWavBuffer(pcmBuffer, requestedSampleRate);
-  } else if (provider === "elevenlabs") {
-    const apiKey = process.env.ELEVEN_API_KEY;
-    if (!apiKey) throw new Error("ELEVEN_API_KEY is missing");
-    
-    // Map sample rate to ElevenLabs format if possible
-    let outputFormat = "audio/wav"; 
-    // ElevenLabs supports specific formats in query params usually.
-    
-    const response = await axios.post(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-      { text, model_id: "eleven_monolingual_v1" },
-      {
-        headers: { "xi-api-key": apiKey, "Content-Type": "application/json", "Accept": "audio/wav" },
-        responseType: "arraybuffer",
-      }
-    );
-    return Buffer.from(response.data);
   }
   throw new Error("Invalid provider");
 }
@@ -120,8 +116,8 @@ async function generateTTS(text: string, provider: string, voiceId: string, qual
 // API Routes
 app.post("/api/preview", async (req, res) => {
   try {
-    const { text, provider, voice_id, quality } = req.body;
-    const audioBuffer = await generateTTS(text.substring(0, 300), provider, voice_id, quality);
+    const { text, provider, voice_id, quality, settings } = req.body;
+    const audioBuffer = await generateTTS(text.substring(0, 300), provider, voice_id, { quality, settings });
     res.set("Content-Type", "audio/wav");
     res.send(audioBuffer);
   } catch (error: any) {
@@ -129,56 +125,88 @@ app.post("/api/preview", async (req, res) => {
   }
 });
 
-app.post("/api/generate", async (req, res) => {
+app.post("/api/generate-longform", async (req, res) => {
   const jobId = uuidv4();
-  jobs.set(jobId, { progress: 0, status: "parsing" });
+  jobs.set(jobId, { progress: 0, status: "segmenting" });
   res.json({ jobId });
 
   try {
-    const { script, project_name, quality } = req.body;
+    const { script, project_name, quality, settings } = req.body;
     const projectId = uuidv4();
     const projectPath = path.join(PROJECTS_DIR, projectId);
     fs.mkdirSync(projectPath);
 
-    const pattern = /\[\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\]\n(.*?)(?=\n\[|$)/gs;
-    const matches = [...script.matchAll(pattern)];
+    // 1. Segmentation
+    const segmentsText = splitTextIntoSegments(script, 750);
+    const totalSegments = segmentsText.length;
+    
+    // 2. Voice Selection
+    const maleVoices = ["Puck", "Charon", "Fenrir"];
+    const femaleVoices = ["Kore", "Zephyr"];
+    const availableVoices = settings.gender === "male" ? maleVoices : femaleVoices;
+    const voiceId = availableVoices[0]; // Default to first available for longform
 
-    if (matches.length === 0) throw new Error("Invalid script format");
+    jobs.set(jobId, { progress: 5, status: `Synthesizing ${totalSegments} segments...` });
 
-    jobs.set(jobId, { progress: 10, status: "synthesizing" });
+    // 3. Parallel Generation
+    const segmentBuffers: Buffer[] = [];
+    const segmentFiles: string[] = [];
 
-    // PARALLEL PROCESSING (10x Speed)
-    const segmentPromises = matches.map(async (match, index) => {
-      const [_, name, provider, voiceId, text] = match;
-      const buffer = await generateTTS(text.trim(), provider.trim().toLowerCase(), voiceId.trim(), quality);
-      
-      // Update progress
-      const currentJob = jobs.get(jobId);
-      if (currentJob) {
-        const progress = 10 + Math.floor(((index + 1) / matches.length) * 80);
-        jobs.set(jobId, { ...currentJob, progress });
-      }
-      
-      return buffer;
+    // Process in batches of 5 to avoid rate limits
+    const batchSize = 5;
+    for (let i = 0; i < totalSegments; i += batchSize) {
+      const batch = segmentsText.slice(i, i + batchSize);
+      const batchPromises = batch.map(async (text, index) => {
+        const segmentIndex = i + index + 1;
+        const buffer = await generateTTS(text, "google", voiceId, { quality, settings });
+        const fileName = `segment_${segmentIndex}.wav`;
+        fs.writeFileSync(path.join(projectPath, fileName), buffer);
+        return { buffer, fileName };
+      });
+
+      const results = await Promise.all(batchPromises);
+      results.forEach(r => {
+        segmentBuffers.push(r.buffer);
+        segmentFiles.push(r.fileName);
+      });
+
+      const progress = 5 + Math.floor(((i + batch.length) / totalSegments) * 85);
+      jobs.set(jobId, { progress, status: `Synthesizing segment ${i + batch.length}/${totalSegments}` });
+    }
+
+    // 4. Merging
+    jobs.set(jobId, { progress: 95, status: "Merging segments..." });
+    const mergedBuffer = mergeWavBuffers(segmentBuffers);
+    const mergedFileName = `${project_name || "full_production"}.wav`;
+    fs.writeFileSync(path.join(projectPath, mergedFileName), mergedBuffer);
+
+    // 5. ZIP Creation
+    jobs.set(jobId, { progress: 98, status: "Creating ZIP archive..." });
+    const zipFileName = `${project_name || "production"}_all_files.zip`;
+    const zipPath = path.join(projectPath, zipFileName);
+    const output = fs.createWriteStream(zipPath);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+
+    archive.pipe(output);
+    segmentFiles.forEach(file => {
+      archive.file(path.join(projectPath, file), { name: file });
     });
-
-    const segments = await Promise.all(segmentPromises);
-
-    jobs.set(jobId, { progress: 95, status: "merging" });
-    const mergedBuffer = mergeWavBuffers(segments);
-    const fileName = `${project_name || "merged"}.wav`;
-    const filePath = path.join(projectPath, fileName);
-    fs.writeFileSync(filePath, mergedBuffer);
+    archive.file(path.join(projectPath, mergedFileName), { name: mergedFileName });
+    await archive.finalize();
 
     const result = {
       success: true,
       projectId,
-      fileName,
-      downloadUrl: `/api/download/${projectId}/${fileName}`
+      fileName: mergedFileName,
+      zipName: zipFileName,
+      downloadUrl: `/api/download/${projectId}/${mergedFileName}`,
+      zipUrl: `/api/download/${projectId}/${zipFileName}`,
+      segments: segmentFiles.map(f => `/api/download/${projectId}/${f}`)
     };
 
     jobs.set(jobId, { progress: 100, status: "completed", result });
   } catch (error: any) {
+    console.error(error);
     jobs.set(jobId, { progress: 0, status: "failed", result: { error: error.message } });
   }
 });
